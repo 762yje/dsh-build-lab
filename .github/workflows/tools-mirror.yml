@@ -78,6 +78,10 @@ jobs:
             echo "VERIFIED $name $tag $asset ${size}B sha256=$sha"
           done < tools/list.txt
           echo "TOTAL=$(wc -l < out/manifest.tsv) failures=$fail"
+          if [ "$(wc -l < out/manifest.tsv)" -lt 3 ]; then
+            echo "LOW_COUNT verified fewer than 3 assets - asset patterns likely rotted"
+            fail=1
+          fi
           {
             echo '### tools-mirror'
             echo '| name | tag | asset | bytes | sha256 |'
