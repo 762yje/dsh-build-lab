@@ -5,7 +5,7 @@ name: tools-mirror
 
 on:
   schedule:
-    - cron: '7 4 * * 1'   # Mondays 04:07 UTC
+    - cron: '7 4 * * 1'
   workflow_dispatch:
 
 permissions:
@@ -41,7 +41,7 @@ jobs:
           fi
           echo "GUARD=OK"
 
-      - name: Fetch + verify upstream assets
+      - name: Fetch and verify upstream assets
         shell: bash
         run: |
           set -uo pipefail
@@ -49,9 +49,8 @@ jobs:
           mkdir -p out
           : > out/manifest.tsv
           fail=0
-          # name|repo|asset-pattern
           while IFS='|' read -r name repo pattern; do
-            [ -z "$name" ] && continue
+            case "$name" in ""|"#"*) continue ;; esac
             if [ $((SECONDS-started)) -gt "$DEADLINE_SECONDS" ]; then
               echo "DEADLINE reached, stopping"; fail=1; break
             fi
@@ -62,12 +61,13 @@ jobs:
             tag=$(printf '%s' "$rel" | jq -r '.tag_name')
             if [ -z "$url" ] || [ "$url" = "null" ]; then echo "NO_ASSET $name"; fail=1; continue; fi
             asset=$(basename "$url")
+            ok=0
             for attempt in 1 2 3; do
-              if curl -fsSL --max-time 180 --retry 0 -o "out/$asset" "$url"; then break; fi
-              echo "retry $attempt for $asset"; [ "$attempt" = 3 ] && { fail=1; break; }
-              sleep $(( attempt * 3 ))
+              if curl -fsSL --max-time 180 -o "out/$asset" "$url"; then ok=1; break; fi
+              echo "retry $attempt for $asset"
+              [ "$attempt" = 3 ] || sleep $(( attempt * 3 ))
             done
-            [ -f "out/$asset" ] || { echo "DOWNLOAD_FAIL $asset"; fail=1; continue; }
+            [ "$ok" = 1 ] || { echo "DOWNLOAD_FAIL $asset"; fail=1; continue; }
             sha=$(sha256sum "out/$asset" | cut -d' ' -f1)
             want=${digest#sha256:}
             if [ -n "$want" ] && [ "$want" != "null" ] && [ "$sha" != "$want" ]; then
@@ -76,18 +76,13 @@ jobs:
             size=$(stat -c%s "out/$asset")
             printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$tag" "$asset" "$size" "$sha" "${want:-unverified}" >> out/manifest.tsv
             echo "VERIFIED $name $tag $asset ${size}B sha256=$sha"
-          done <<'LIST'
-jq|jqlang/jq|jq-.*windows-amd64
-ripgrep|BurntSushi/ripgrep|ripgrep-.*-x86_64-pc-windows-msvc.zip
-fd|sharkdp/fd|fd-.*-x86_64-pc-windows-msvc.zip
-fzf|junegunn/fzf|fzf-.*_windows_amd64.zip
-LIST
+          done < tools/list.txt
           echo "TOTAL=$(wc -l < out/manifest.tsv) failures=$fail"
           {
             echo '### tools-mirror'
             echo '| name | tag | asset | bytes | sha256 |'
             echo '|---|---|---|---|---|'
-            awk -F'\t' '{printf "| %s | %s | %s | %s | %.16s… |\n",$1,$2,$3,$4,$5}' out/manifest.tsv
+            awk -F'\t' '{printf "| %s | %s | %s | %s | %.16s... |\n",$1,$2,$3,$4,$5}' out/manifest.tsv
           } >> "$GITHUB_STEP_SUMMARY"
           exit "$fail"
 

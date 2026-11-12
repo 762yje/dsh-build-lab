@@ -1,0 +1,5 @@
+# name|repo|asset-name-pattern  (regex accepted by jq test)
+jq|jqlang/jq|jq-.*windows-amd64
+ripgrep|BurntSushi/ripgrep|ripgrep-.*x86_64-pc-windows-msvc\.zip
+fd|sharkdp/fd|fd-.*x86_64-pc-windows-msvc\.zip
+fzf|junegunn/fzf|fzf-.*_windows_amd64\.zip
