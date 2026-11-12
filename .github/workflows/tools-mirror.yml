@@ -1,0 +1,101 @@
+name: tools-mirror
+
+# Weekly, sanitized mirror of upstream release assets with SHA-256 verification.
+# Runs on public runners only; needs no credential beyond the default read token.
+
+on:
+  schedule:
+    - cron: '7 4 * * 1'   # Mondays 04:07 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: tools-mirror
+  cancel-in-progress: false
+
+env:
+  DEADLINE_SECONDS: 900
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Guard against duplicate in-flight runs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          n=$(gh api "repos/$REPO/actions/workflows/tools-mirror.yml/runs?status=in_progress" --jq '.total_count // 0' 2>/dev/null || echo 0)
+          if [ "${n:-0}" -gt 1 ]; then
+            echo "GUARD=ABORT another run already in progress"
+            exit 1
+          fi
+          echo "GUARD=OK"
+
+      - name: Fetch + verify upstream assets
+        shell: bash
+        run: |
+          set -uo pipefail
+          started=$SECONDS
+          mkdir -p out
+          : > out/manifest.tsv
+          fail=0
+          # name|repo|asset-pattern
+          while IFS='|' read -r name repo pattern; do
+            [ -z "$name" ] && continue
+            if [ $((SECONDS-started)) -gt "$DEADLINE_SECONDS" ]; then
+              echo "DEADLINE reached, stopping"; fail=1; break
+            fi
+            echo "== $name ($repo)"
+            rel=$(curl -fsS --max-time 60 "https://api.github.com/repos/$repo/releases/latest") || { echo "FETCH_FAIL $name"; fail=1; continue; }
+            url=$(printf '%s' "$rel" | jq -r --arg p "$pattern" '[.assets[] | select(.name|test($p))][0].browser_download_url // empty')
+            digest=$(printf '%s' "$rel" | jq -r --arg p "$pattern" '[.assets[] | select(.name|test($p))][0].digest // empty')
+            tag=$(printf '%s' "$rel" | jq -r '.tag_name')
+            if [ -z "$url" ] || [ "$url" = "null" ]; then echo "NO_ASSET $name"; fail=1; continue; fi
+            asset=$(basename "$url")
+            for attempt in 1 2 3; do
+              if curl -fsSL --max-time 180 --retry 0 -o "out/$asset" "$url"; then break; fi
+              echo "retry $attempt for $asset"; [ "$attempt" = 3 ] && { fail=1; break; }
+              sleep $(( attempt * 3 ))
+            done
+            [ -f "out/$asset" ] || { echo "DOWNLOAD_FAIL $asset"; fail=1; continue; }
+            sha=$(sha256sum "out/$asset" | cut -d' ' -f1)
+            want=${digest#sha256:}
+            if [ -n "$want" ] && [ "$want" != "null" ] && [ "$sha" != "$want" ]; then
+              echo "CHECKSUM_MISMATCH $asset expected=$want got=$sha"; fail=1; continue
+            fi
+            size=$(stat -c%s "out/$asset")
+            printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$tag" "$asset" "$size" "$sha" "${want:-unverified}" >> out/manifest.tsv
+            echo "VERIFIED $name $tag $asset ${size}B sha256=$sha"
+          done <<'LIST'
+jq|jqlang/jq|jq-.*windows-amd64
+ripgrep|BurntSushi/ripgrep|ripgrep-.*-x86_64-pc-windows-msvc.zip
+fd|sharkdp/fd|fd-.*-x86_64-pc-windows-msvc.zip
+fzf|junegunn/fzf|fzf-.*_windows_amd64.zip
+LIST
+          echo "TOTAL=$(wc -l < out/manifest.tsv) failures=$fail"
+          {
+            echo '### tools-mirror'
+            echo '| name | tag | asset | bytes | sha256 |'
+            echo '|---|---|---|---|---|'
+            awk -F'\t' '{printf "| %s | %s | %s | %s | %.16s… |\n",$1,$2,$3,$4,$5}' out/manifest.tsv
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$fail"
+
+      - name: Publish verified bundle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-tools
+          path: out/
+          retention-days: 14
+          if-no-files-found: warn
